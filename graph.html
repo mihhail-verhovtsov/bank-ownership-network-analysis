@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Bankscope ownership graph</title>
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/font-awesome/4.5.0/css/font-awesome.min.css">
+    <link rel="stylesheet" href="static/css/style.css"/>
+    <link rel="stylesheet" href="static/css/jquery.slider.min.css"/>
+    <script src="static/js/jquery-1.7.1.js"></script>
+    <script src="static/js/jquery.slider.min.js"></script>
+    <script src="static/js/d3.js"></script>
+    <script src="static/js/colorbrewer.js"></script>
+    <script src="static/js/d3-tip.js"></script>
+    <script src="static/js/underscore.js"></script>
+    <script src="static/js/utils.js"></script>
+</head>
+<body>
+
+<aside>
+    <section>
+        <h1>Bank ownership network</h1>
+        <em>Data provided by Bankscope</em>
+
+        <ul class="links section">
+            <li><a href="graph.html">Banks</a></li>
+            <li><a href="graph.html?src=groups-standalone">Bank groups & standalone</a></li>
+            <li><a href="graph.html?src=groups-other">Bank groups & standalone as one</a></li>
+            <li><a href="graph.html?src=countries">Countries</a></li>
+        </ul>
+    </section>
+    <hr/>
+    <section>
+        <form name="settings">
+            <div class="center">
+                <button type="button" id="play"><i class="fa fa-play"></i></button>
+                <button type="button" id="stop" class="hidden"><i class="fa fa-stop"></i></button>
+            </div>
+            <div>
+                <label>Year:</label>
+                <input type="slider" id="year" name="year" value="2003"/>
+            </div>
+            <div>
+                <label>Speed:</label>
+                <input type="slider" id="speed" name="speed" value="4"/>
+            </div>
+            <div>
+                <label>Zoom:</label>
+                <input type="slider" id="zoom" name="zoom" value="100"/>
+            </div>
+            <div>
+                <label>Resize nodes by:</label>
+                <select id="nodeSize" name="nodeSize">
+                </select>
+            </div>
+            <div>
+                <label>Color nodes by:</label>
+                <select id="nodeColor" name="nodeColor">
+                </select>
+            </div>
+            <div>
+                <label>Resize links by:</label>
+                <select id="linkSize" name="linkSize">
+                    <option value="binary">Binary</option>
+                    <option value="weights">Share percentage value</option>
+                    <option value="absolute">Share absolute value</option>
+                </select>
+            </div>
+            <div>
+                <label>
+                    <input type="checkbox" id="labels" name="labels" checked="checked" /> Show labels
+                </label>
+            </div>
+            <div>
+                <button type="button" id="fix">Fix positions</button>
+            </div>
+            <div>
+                <button type="button" id="clear">Clear styles</button>
+            </div>
+        </form>
+    </section>
+</aside>
+
+<main>
+
+    <script>
+        var firstYear = 2003;
+        var lastYear = 2013;
+
+        var centralities = [
+            "Degree centrality",
+            "Share-weighted degree centrality",
+            "Assets-weighted degree centrality",
+            "Closeness centrality",
+            "Share-weighted closeness centrality",
+            "Assets-weighted closeness centrality"
+        ];
+
+        var sizes = [
+            "Total Assets",
+            "Equity",
+            "Net Loans",
+            "Total Customer Deposits",
+            "Net Income",
+            "Operating Profit"
+        ];
+
+        var series = sizes.concat(centralities);
+
+        $("#year").slider({
+            from: firstYear,
+            to: lastYear,
+            step: 1,
+            format: {format: '####', locale: 'us'},
+            dimension: '',
+            callback: function () {
+                $('#year').trigger('change');
+            }
+        });
+
+        $("#speed").slider({
+            from: 1,
+            to: 10,
+            step: 1,
+            format: {format: '##', locale: 'us'},
+            dimension: 'x'
+        });
+
+        $("#zoom").slider({
+            from: 50,
+            to: 200,
+            step: 10,
+            format: {format: '###', locale: 'us'},
+            dimension: '%'
+        });
+
+        d3.select("#nodeSize").selectAll("option")
+                .data(series)
+                .enter().append("option")
+                .attr("value", String)
+                .text(String);
+
+        d3.select("#nodeColor").selectAll("option")
+                .data(series)
+                .enter().append("option")
+                .attr("value", String)
+                .text(String);
+
+        var nodes;
+        var links;
+
+        var width = 1500;
+        var height = 1500;
+        var distanceFactor = 1.0;
+        var labelThreshold = 6;
+        var direction = true;
+
+        if (readParameter("src", "banks") == "countries") {
+            width = 1000;
+            height = 1000;
+            distanceFactor = 2.0;
+            labelThreshold = 5;
+            direction = false;
+        }
+
+        var settings = document.forms.settings;
+
+        var svg = d3.select("main").append("svg")
+                .attr("width", width)
+                .attr("height", height);
+
+        svg.append("defs").append("marker")
+            .attr("id", "marker")
+            //.attr("viewBox", "0 -5 10 10")
+            .attr("refX", 55)
+            .attr("refY", 3)
+            .attr("markerUnits", "strokeWidth")
+            .attr("markerWidth", 10)
+            .attr("markerHeight", 10)
+            .attr("orient", "auto")
+          .append("path")
+            .attr("d", "M0,0 L0,6 L9,3 z")
+            .attr("fill", "#666");
+
+        var group = svg.append("g");
+
+        var src = readParameter("src", "banks");
+
+        var srcPath = "output/" + src + ".json";
+
+        console.log("Loading data from %s", srcPath);
+
+        d3.json(srcPath, function (graph) {
+            nodes = graph.nodes;
+            links = graph.links;
+
+            nodes.forEach(function (node) {
+                node.series = _.extend({}, node.sizes, node.centralities);
+            });
+
+            var nodeSizeScales = _.object(series, series.map(function (series) {
+                return d3.scale.linear().domain(nodeExtents(series)).range([3, 50]);
+            }));
+
+            var nodeColorScales = _.object(series, series.map(function (series) {
+                return d3.scale.linear().domain(divide(nodeExtents(series))).range(["black", "white"]);//.range(["blue", "yellow", "red"]);
+            }));
+
+            var linkSizeScales = {
+                weights: d3.scale.linear().domain([0, 1.0]).range([0, 1.0]),
+                absolute: d3.scale.linear().domain(linkExtents("absolute")).range([0, 20.0])
+            };
+
+            var force = d3.layout.force()
+                    .size([width, height])
+                    .linkDistance(140 * distanceFactor)
+                    .linkStrength(0.8)
+                    .charge(-140)
+                    .nodes(nodes)
+                    .links(links);
+
+            var node_drag = d3.behavior.drag()
+                    .on("dragstart", dragStart)
+                    .on("drag", dragMove)
+                    .on("dragend", dragEnd);
+
+            var link = group.selectAll(".link")
+                    .data(links)
+                    .enter().append("line")
+                    .attr("class", "link");
+
+            if (direction) {
+                link.attr("marker-end", "url(#marker)");
+            }
+
+            var node = group.selectAll(".node")
+                    .data(nodes)
+                    .enter()
+                    .append("g")
+                    .attr("class", "node")
+                    .call(node_drag);
+
+            node.on('click', function (d) {
+                if (d3.event.ctrlKey) d.label = true;
+            });
+
+            function dragStart(d, i) {
+                force.stop();
+            }
+
+            function dragMove(d, i) {
+                d.px += d3.event.dx;
+                d.py += d3.event.dy;
+                d.x += d3.event.dx;
+                d.y += d3.event.dy;
+                forceTick(); // this is the key to make it work together with updating both px,py,x,y on d !
+            }
+
+            function dragEnd(d, i) {
+                d.fixed = true; // of course set the node to fixed so the force doesn't include the node in its auto positioning stuff
+                forceTick();
+                force.resume();
+            }
+
+            node.append("circle")
+                    .attr("class", "dot")
+                    .attr("r", 5);
+
+            node.append("text")
+                    .text(function(d) { return d.name; })
+                    .attr("class", "label")
+                    .attr("x", "10");
+
+            node.append("title").text(function (d) {
+                return d.id + " - " + d.name + " (" + d.count + ")";
+            });
+
+            force.on("tick", forceTick);
+
+            function forceTick() {
+                link
+                        .attr("x1", function (d) { return d.source.x; })
+                        .attr("y1", function (d) { return d.source.y; })
+                        .attr("x2", function (d) { return d.target.x; })
+                        .attr("y2", function (d) { return d.target.y; });
+
+                node.attr("transform", function(d) { return "translate(" + d.x + "," + d.y + ")"; });
+            }
+
+            var timeout;
+
+            function scheduleTick() {
+                timeout = setTimeout(tick, settings.speed.value * 200);
+            }
+
+            d3.select("#play").on("click", function () {
+                scheduleTick();
+                $('#play, #stop').toggleClass("hidden");
+            });
+
+            d3.select("#stop").on("click", function () {
+                clearTimeout(timeout);
+                $('#play, #stop').toggleClass("hidden");
+            });
+
+            d3.select("#fix").on("click", function () {
+                node.each(function (d) { d.fixed = true; });
+                d3.select("#fix").attr('disabled', 'disabled');
+            });
+
+            d3.select("#clear").on("click", function () {
+                console.log("Clearing style elements");
+                d3.selectAll("circle, text, title, line").attr('style', null);
+                updateGraph();
+            });
+
+            function tick() {
+                advanceYear();
+                updateGraph();
+                scheduleTick();
+            }
+
+            function advanceYear() {
+                var year = settings.year;
+                year.value = (year.value == lastYear ? firstYear : +year.value + 1);
+                $("#year").slider("value", year.value)
+            }
+
+            function updateGraph() {
+                document.title = "bankscope-" + src + "-" + settings.year.value;
+
+                var index = settings.year.value - firstYear;
+
+                var nodeSizeSeries = settings.nodeSize.value;
+                var nodeColorSeries = settings.nodeColor.value;
+                var linkSizeSeries = settings.linkSize.value;
+                var labels = settings.labels.checked;
+
+                group.selectAll('.link')
+                        .style("stroke-width", function (d) {
+                            return linkSizeSeries != 'binary' ? linkSizeScales[linkSizeSeries](d[linkSizeSeries][index] || 0) : (!d.weights ? 0 : 1);
+                        });
+
+                group.selectAll('.node').select("circle")
+                        .attr("r", function (d) {
+                            return d.r = nodeSizeScales[nodeSizeSeries](d.series[nodeSizeSeries][index] || 0);
+                        })
+                        .style("fill", function (d) {
+                            return nodeColorScales[nodeColorSeries](d.series[nodeColorSeries][index] || 0);
+                        });
+
+                group.selectAll('.node').select("text")
+                        .attr("visibility", function (d) { return labels && (d.label || d.r > labelThreshold) ? "visible" : "hidden" });
+            }
+
+            updateGraph();
+
+            $("#year, #speed, #zoom, #nodeSize, #nodeColor, #linkSize, #labels, #manual").on("change", updateGraph);
+
+            force.start();
+
+        });
+
+
+    </script>
+
+</main>
+
+</body>
+
+</html>
